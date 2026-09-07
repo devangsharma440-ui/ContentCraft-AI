@@ -9,6 +9,7 @@ const globalForPrisma = globalThis as unknown as {
 
 const adapter = new PrismaLibSql({
   url: process.env.DATABASE_URL || 'file:./dev.db',
+  authToken: process.env.TURSO_AUTH_TOKEN,
 })
 
 export const prisma =
