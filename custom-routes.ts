@@ -516,60 +516,64 @@ Estimated SEO Score: 74/100`
     }
 
     case 'youtube': {
-      const topicWords = topic.split(/\s+/).slice(0, 5).join(' ')
-      return `5 Title Ideas:
-1. ${topic} â€” The Complete Beginner's Guide
-2. How to Master ${topic} in 2026 (Step by Step)
-3. I Tried ${topic} for 30 Days â€” Here's What Happened
+      const topicWords = topic.split(/\s+/).slice(0, 5).join(' ');
+      const currentYear = new Date().getFullYear();
+      // Guidelines: Avoid outdated or static year references. Use the actual current year when needed. Do not invent time-sensitive claims.
+      return `Guidelines: Avoid outdated year references; use the current year (${currentYear}) when a year is needed.
+
+5 Title Ideas:
+1. ${topic} — The Complete Beginner's Guide
+2. How to Master ${topic} in ${currentYear} (Step by Step)
+3. I Tried ${topic} for 30 Days — Here's What Happened
 4. ${topic}: Everything You NEED to Know Before You Start
 5. The ${topic} Blueprint That Actually Works
 
 Hook (First 15 Seconds):
-"If you've been trying to figure out ${topic} and nothing seems to work â€” you're in the right place. In this video, I'm going to break down exactly what you need to do, step by step, so you can start seeing real results."
+"If you've been trying to figure out ${topic} and nothing seems to work — you're in the right place. In this video, I'm going to break down exactly what you need to do, step by step, so you can start seeing real results."
 
 Script:
 
-[INTRO â€” 0:00]
+[INTRO — 0:00]
 Hey everyone, welcome back to the channel! If you're new here, we break down complex topics into simple, actionable steps. Today we're diving deep into ${topicWords}.
 
-[SECTION 1 â€” THE PROBLEM â€” 1:00]
+[SECTION 1 — THE PROBLEM — 1:00]
 Here's the thing most people get wrong about ${topic}: they overcomplicate it. They try to do everything at once and end up overwhelmed. Sound familiar?
 
-[SECTION 2 â€” THE FRAMEWORK â€” 3:00]
+[SECTION 2 — THE FRAMEWORK — 3:00]
 Let me share a simple framework that changed everything for me. It has three parts:
 
-Step 1: Start with the basics â€” understand the fundamentals before trying advanced techniques.
-Step 2: Take consistent action â€” small daily steps beat occasional bursts of effort.
-Step 3: Measure and adjust â€” track what works and double down on it.
+Step 1: Start with the basics — understand the fundamentals before trying advanced techniques.
+Step 2: Take consistent action — small daily steps beat occasional bursts of effort.
+Step 3: Measure and adjust — track what works and double down on it.
 
-[SECTION 3 â€” PRACTICAL TIPS â€” 7:00]
+[SECTION 3 — PRACTICAL TIPS — 7:00]
 Now let me give you some practical tips you can implement today:
 
 Tip 1: Focus on one thing at a time. Don't try to master everything at once.
 Tip 2: Set realistic goals. Progress is progress, no matter how small.
 Tip 3: Learn from others who've been where you are.
 
-[SUMMARY â€” 12:00]
+[SUMMARY — 12:00]
 To recap: start with the fundamentals, take consistent daily action, measure your results, and keep improving.
 
-[CTA â€” 13:00]
-If this was helpful, smash that like button and subscribe â€” it really helps the channel. Drop a comment below telling me which tip you're going to try first. I read every single comment.
+[CTA — 13:00]
+If this was helpful, smash that like button and subscribe — it really helps the channel. Drop a comment below telling me which tip you're going to try first. I read every single comment.
 
 Video Description:
 In this video, I break down ${topic} into simple, actionable steps. Whether you're a complete beginner or looking to level up, this guide covers everything you need to know.
 
-â° Timestamps:
-0:00 â€” Introduction
-1:00 â€” The Problem
-3:00 â€” The Framework
-7:00 â€” Practical Tips
-12:00 â€” Summary
-13:00 â€” Final Thoughts
+⏰ Timestamps:
+0:00 — Introduction
+1:00 — The Problem
+3:00 — The Framework
+7:00 — Practical Tips
+12:00 — Summary
+13:00 — Final Thoughts
 
 #${topicWords.replace(/\s+/g, '')} #Tutorial #Guide #Beginner #Tips
 
 Tags:
-${topicWords}, ${topicWords} tutorial, ${topicWords} for beginners, how to ${topicWords}, ${topicWords} guide 2026, ${topicWords} tips, ${topicWords} step by step, learn ${topicWords}, ${topicWords} explained, best ${topicWords} strategies, ${topicWords} 101, ${topicWords} for dummies, ${topicWords} from scratch, ${topicWords} complete guide, ${topicWords} that works`
+${topicWords}, ${topicWords} tutorial, ${topicWords} for beginners, how to ${topicWords}, ${topicWords} guide ${currentYear}, ${topicWords} tips, ${topicWords} step by step, learn ${topicWords}, ${topicWords} explained, best ${topicWords} strategies, ${topicWords} 101, ${topicWords} for dummies, ${topicWords} from scratch, ${topicWords} complete guide, ${topicWords} that works`
     }
 
     case 'rewrite': {
