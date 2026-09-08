@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: contentcraft-ai
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false # Configure securely in Render Dashboard (Environment tab)

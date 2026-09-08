@@ -1,28 +1,112 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
+import { getCookie, setCookie } from 'hono/cookie'
 
 const app = new Hono()
 
-// â”€â”€ In-memory user API key (server-side only, never serialized) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── In-memory Session-isolated Store (Server-side only) ──
+// Each user/browser session gets an isolated in-memory record.
+// Keys are never sent to the client, never logged, and never persisted to disk.
 
-let userApiKey: string | null = null
-
-function getActiveKey(): string | null {
-  return userApiKey || process.env.GEMINI_API_KEY || null
+interface UserSession {
+  userApiKey: string | null
+  cachedWorkingModel: string | null
+  cachedModelKey: string | null
+  lastActive: number
 }
 
-// â”€â”€ Gemini Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const SESSION_COOKIE_NAME = 'cc_session_id'
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+
+const sessionStore = new Map<string, UserSession>()
+
+// Prune expired sessions periodically
+function cleanupSessions() {
+  const now = Date.now()
+  for (const [id, session] of sessionStore.entries()) {
+    if (now - session.lastActive > SESSION_TTL_MS) {
+      sessionStore.delete(id)
+    }
+  }
+}
+
+function getOrCreateSessionId(c: Context): string {
+  let sessionId = getCookie(c, SESSION_COOKIE_NAME) || c.req.header('x-session-id')
+  if (!sessionId) {
+    sessionId = crypto.randomUUID()
+    setCookie(c, SESSION_COOKIE_NAME, sessionId, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+    })
+  }
+  return sessionId
+}
+
+function getSession(c: Context): UserSession {
+  cleanupSessions()
+  const sessionId = getOrCreateSessionId(c)
+  let session = sessionStore.get(sessionId)
+  if (!session) {
+    session = {
+      userApiKey: null,
+      cachedWorkingModel: null,
+      cachedModelKey: null,
+      lastActive: Date.now(),
+    }
+    sessionStore.set(sessionId, session)
+  } else {
+    session.lastActive = Date.now()
+  }
+  return session
+}
+
+function getActiveKey(c: Context): string | null {
+  const session = getSession(c)
+  return session.userApiKey || process.env.GEMINI_API_KEY || null
+}
+
+// ── Gemini Helper & Model Discovery ──────────────────────────────────────────
 
 type DemoType = 'generate' | 'linkedin' | 'rewrite' | 'seo' | 'youtube'
 
 // Priority-ordered list of current stable text-capable models.
-// Only active, non-deprecated models. No image/audio/embedding/video models.
+// Only active, text-capable production models. No image-only, audio, or video models.
 const MODEL_CANDIDATES = [
+  'gemini-3.8-flash',
   'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
 ]
-// Cache the first model that works for the current API key.
-// Reset when key changes.
-let cachedWorkingModel: string | null = null
-let cachedModelKey: string | null = null
+
+// Server-level working model cache for the shared environment key (free users)
+let envModelCache: { model: string; key: string } | null = null
+
+// ── Future Business Architecture Hook (Free vs Pro Plans) ──
+// Ready for: User Account -> Plan (Free/Pro) -> Usage Limit -> Gemini Request -> Usage Tracking
+export interface RequestUsageContext {
+  plan: 'free' | 'pro'
+  keySource: 'environment' | 'user' | 'none'
+  canProceed: boolean
+  limitMessage?: string
+}
+
+export function evaluateUsageContext(c: Context): RequestUsageContext {
+  const session = getSession(c)
+  const hasUserKey = !!session.userApiKey
+  const hasEnvKey = !!process.env.GEMINI_API_KEY
+
+  // In the future, verify user session token, lookup plan in DB, check usage count
+  return {
+    plan: 'free',
+    keySource: hasUserKey ? 'user' : hasEnvKey ? 'environment' : 'none',
+    canProceed: true,
+  }
+}
 
 interface GeminiError {
   status: number
@@ -49,27 +133,47 @@ function classifyGeminiError(status: number, geminiError: string): string {
   return `Gemini connection failed (HTTP ${status}).`
 }
 
-async function callGeminiWithModel(model: string, apiKey: string, prompt: string) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-      }),
+async function callGeminiWithModel(model: string, apiKey: string, prompt: string, attempt = 1): Promise<{ text: string }> {
+  let res: Response
+  try {
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: prompt }],
+            },
+          ],
+        }),
+      }
+    )
+  } catch (networkErr: any) {
+    if (attempt <= 2) {
+      await new Promise((r) => setTimeout(r, 500))
+      return callGeminiWithModel(model, apiKey, prompt, attempt + 1)
     }
-  )
+    const err: any = new Error('Network error. Could not reach Gemini API.')
+    err.status = 0
+    err.geminiError = networkErr?.message || 'Network unreachable'
+    err.model = model
+    throw err
+  }
 
   if (!res.ok) {
     const status = res.status
+
+    // If 5xx transient error and first attempt, retry once
+    if (status >= 500 && attempt <= 2) {
+      await new Promise((r) => setTimeout(r, 500 * attempt))
+      return callGeminiWithModel(model, apiKey, prompt, attempt + 1)
+    }
+
     let geminiError = ''
 
     try {
@@ -127,7 +231,8 @@ async function callGeminiWithModel(model: string, apiKey: string, prompt: string
 
   return { text }
 }
-// Probe a single model with a minimal request (3 tokens max).
+
+// Probe a single model with a minimal request (5 tokens max).
 // Returns the HTTP status code (200 = works, 403 = auth error, 404 = model not found, etc.)
 async function probeModel(model: string, apiKey: string): Promise<number> {
   try {
@@ -152,43 +257,64 @@ async function probeModel(model: string, apiKey: string): Promise<number> {
 }
 
 // Discover the first working model for the given API key.
-// Returns { model, error? } where error is set if all models failed for auth reasons.
+// Returns { model, error? }
+// Stops immediately on 401/403 (Auth Error) or 429 (Rate Limit).
+// Continues to next candidate only on 404 (Model Not Found).
 async function discoverWorkingModel(
-  apiKey: string
+  apiKey: string,
+  session?: UserSession
 ): Promise<{ model: string | null; error?: string }> {
-  if (cachedWorkingModel && cachedModelKey === apiKey) {
-    const status = await probeModel(cachedWorkingModel, apiKey)
-    if (status === 200) return { model: cachedWorkingModel }
-    cachedWorkingModel = null
-    cachedModelKey = null
-  }
+  const isEnvKey = apiKey === process.env.GEMINI_API_KEY
 
-  let firstAuthStatus: number | null = null
+  // Check cached model
+  const cachedModel = session?.cachedWorkingModel && session.cachedModelKey === apiKey
+    ? session.cachedWorkingModel
+    : isEnvKey && envModelCache?.key === apiKey
+      ? envModelCache.model
+      : null
+
+  if (cachedModel) {
+    const status = await probeModel(cachedModel, apiKey)
+    if (status === 200) return { model: cachedModel }
+
+    // If cached model is no longer working (e.g. 404), invalidate
+    if (session) {
+      session.cachedWorkingModel = null
+      session.cachedModelKey = null
+    }
+    if (isEnvKey) {
+      envModelCache = null
+    }
+  }
 
   for (const model of MODEL_CANDIDATES) {
     const status = await probeModel(model, apiKey)
 
     if (status === 200) {
-      cachedWorkingModel = model
-      cachedModelKey = apiKey
+      if (session) {
+        session.cachedWorkingModel = model
+        session.cachedModelKey = apiKey
+      }
+      if (isEnvKey) {
+        envModelCache = { model, key: apiKey }
+      }
       return { model }
     }
 
-    if (firstAuthStatus === null && status !== 404) {
-      firstAuthStatus = status
+    // Auth error: stop immediately. Rotating models will not fix invalid/unauthorized keys.
+    if (status === 401 || status === 403) {
+      return { model: null, error: 'API key is invalid or does not have permission to use Gemini.' }
     }
+
+    // Rate limit: stop immediately. Do not burn quota rotating models.
+    if (status === 429) {
+      return { model: null, error: 'Gemini quota/rate limit reached. Please try again later.' }
+    }
+
+    // 404: model not supported on this project/tier -> try next model in candidate list.
   }
 
-  if (firstAuthStatus === 401 || firstAuthStatus === 403 || firstAuthStatus === 400) {
-    return { model: null, error: 'API key is invalid or does not have permission to use Gemini.' }
-  }
-  if (firstAuthStatus === 429) {
-    return { model: null, error: 'Gemini quota/rate limit reached. Please try again later.' }
-  }
-  if (firstAuthStatus === 0) {
-    return { model: null, error: 'Network error. Could not reach Gemini API.' }
-  }
-  return { model: null }
+  return { model: null, error: 'No compatible Gemini text model is available for this API key.' }
 }
 
 // Classify the error for user-facing messages based on HTTP status.
@@ -200,14 +326,18 @@ function classifyError(status: number): string {
 }
 
 async function callGemini(
-  prompt: string, demoType: DemoType, userInput: string
+  c: Context,
+  prompt: string,
+  demoType: DemoType,
+  userInput: string
 ): Promise<{ text: string; demo: boolean }> {
-  const apiKey = getActiveKey()
+  const session = getSession(c)
+  const apiKey = getActiveKey(c)
   if (!apiKey) {
     return { text: generateDemoContent(demoType, userInput), demo: true }
   }
 
-  const discovery = await discoverWorkingModel(apiKey)
+  const discovery = await discoverWorkingModel(apiKey, session)
   if (!discovery.model) {
     if (discovery.error?.includes('invalid') || discovery.error?.includes('permission')) {
       const err: any = new Error('AUTH_ERROR')
@@ -230,8 +360,27 @@ async function callGemini(
   }
 
   try {
-    return { text: (await callGeminiWithModel(prompt, discovery.model, apiKey)).text, demo: false }
+    return { text: (await callGeminiWithModel(discovery.model, apiKey, prompt)).text, demo: false }
   } catch (e: any) {
+    // If runtime call returns 404 on the selected model, clear cache and try discovering a fallback
+    if (e?.status === 404) {
+      if (session) {
+        session.cachedWorkingModel = null
+        session.cachedModelKey = null
+      }
+      if (apiKey === process.env.GEMINI_API_KEY) {
+        envModelCache = null
+      }
+      const retryDiscovery = await discoverWorkingModel(apiKey, session)
+      if (retryDiscovery.model && retryDiscovery.model !== discovery.model) {
+        try {
+          return { text: (await callGeminiWithModel(retryDiscovery.model, apiKey, prompt)).text, demo: false }
+        } catch {
+          // fallback to standard error classification below
+        }
+      }
+    }
+
     const errType = classifyError(e?.status || 0)
     if (errType === 'AUTH_ERROR') {
       const authErr: any = new Error('AUTH_ERROR')
@@ -459,11 +608,15 @@ The key is to start now. Don't wait for perfect conditions â€” they'll neve
 // â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function safeCallGemini(
-  prompt: string, demoType: DemoType, userInput: string
+  c: Context,
+  prompt: string,
+  demoType: DemoType,
+  userInput: string
 ): Promise<{ content: string; demo: boolean; error?: string; workingModel?: string }> {
+  const session = getSession(c)
   try {
-    const result = await callGemini(prompt, demoType, userInput)
-    return { content: result.text, demo: result.demo, workingModel: cachedWorkingModel || undefined }
+    const result = await callGemini(c, prompt, demoType, userInput)
+    return { content: result.text, demo: result.demo, workingModel: session.cachedWorkingModel || undefined }
   } catch (e: any) {
     if (e?.message === 'AUTH_ERROR') {
       return {
@@ -497,7 +650,7 @@ async function safeCallGemini(
   }
 }
 
-app.get('/health', (c) => c.json({ status: 'ok', hasApiKey: !!getActiveKey() }))
+app.get('/health', (c) => c.json({ status: 'ok', hasApiKey: !!getActiveKey(c) }))
 
 app.post('/generate', async (c) => {
   const body = await c.req.json()
@@ -519,7 +672,7 @@ Requirements:
 
 Write the complete content now. Do not include any meta-commentary, just the content itself.`
 
-  const result = await safeCallGemini(prompt, 'generate', keyPoints)
+  const result = await safeCallGemini(c, prompt, 'generate', keyPoints)
   if (result.error) return c.json({ error: result.error }, 401)
   return c.json({ content: result.content, demo: result.demo })
 })
@@ -542,7 +695,7 @@ Language: ${language || 'English'}
 Rules:
 - Start with a strong, attention-grabbing hook (first line)
 - Write short paragraphs (1-3 sentences each)
-- Use natural, human tone â€” professional but not robotic
+- Use natural, human tone — professional but not robotic
 - Do NOT invent facts, achievements, or statistics the user did not provide
 - Do NOT add fake experiences or statistics
 - End with a clear call-to-action (question, invitation to share, etc.)
@@ -553,7 +706,7 @@ Rules:
 
 Write the LinkedIn post now.`
 
-  const result = await safeCallGemini(prompt, 'linkedin', points)
+  const result = await safeCallGemini(c, prompt, 'linkedin', points)
   if (result.error) return c.json({ error: result.error }, 401)
   return c.json({ content: result.content, demo: result.demo })
 })
@@ -584,9 +737,9 @@ app.post('/rewrite', async (c) => {
 Original content:
 "${content}"
 
-Write the improved version now. Do not add explanations â€” just provide the rewritten content.`
+Write the improved version now. Do not add explanations — just provide the rewritten content.`
 
-  const result = await safeCallGemini(prompt, 'rewrite', content)
+  const result = await safeCallGemini(c, prompt, 'rewrite', content)
   if (result.error) return c.json({ error: result.error }, 401)
   return c.json({ content: result.content, demo: result.demo })
 })
@@ -616,7 +769,7 @@ Provide ALL of the following:
 
 Format the output clearly with labels and line breaks. Be specific and actionable.`
 
-  const result = await safeCallGemini(prompt, 'seo', topic)
+  const result = await safeCallGemini(c, prompt, 'seo', topic)
   if (result.error) return c.json({ error: result.error }, 401)
   return c.json({ content: result.content, demo: result.demo })
 })
@@ -637,7 +790,7 @@ Video Length: ${videoLength || '10 minutes'}
 
 Provide ALL of the following:
 1. 5 Title Ideas (engaging, clickable, SEO-friendly)
-2. Hook (the first 15 seconds â€” grab attention immediately)
+2. Hook (the first 15 seconds — grab attention immediately)
 3. Complete Video Script with:
    - Intro (hook + what the video is about)
    - Main content sections with clear transitions
@@ -648,16 +801,17 @@ Provide ALL of the following:
 
 Format clearly with section headers. Make the content engaging and optimized for YouTube's algorithm.`
 
-  const result = await safeCallGemini(prompt, 'youtube', topic)
+  const result = await safeCallGemini(c, prompt, 'youtube', topic)
   if (result.error) return c.json({ error: result.error }, 401)
   return c.json({ content: result.content, demo: result.demo })
 })
 
-// â”€â”€ Settings Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Settings Routes ───────────────────────────────────────────────────────────
 
 // Status: never returns the actual key, only whether one is set
 app.get('/settings/status', (c) => {
-  const hasUserKey = !!userApiKey
+  const session = getSession(c)
+  const hasUserKey = !!session.userApiKey
   const hasEnvKey = !!process.env.GEMINI_API_KEY
   return c.json({
     hasUserKey,
@@ -681,29 +835,36 @@ app.post('/settings/key', async (c) => {
     return c.json({ error: 'API key appears too short. Please check your key and try again.' }, 400)
   }
 
-  userApiKey = trimmed
+  const session = getSession(c)
+  session.userApiKey = trimmed
+  session.cachedWorkingModel = null
+  session.cachedModelKey = null
   return c.json({ ok: true, message: 'API key saved successfully.' })
 })
 
 // Remove user API key
 app.delete('/settings/key', (c) => {
-  userApiKey = null
+  const session = getSession(c)
+  session.userApiKey = null
+  session.cachedWorkingModel = null
+  session.cachedModelKey = null
   return c.json({ ok: true, message: 'API key removed. App will use environment key or demo mode.' })
 })
 
 // Test the active key by discovering a working model with a minimal request.
 app.post('/settings/test', async (c) => {
-  const key = getActiveKey()
+  const session = getSession(c)
+  const key = getActiveKey(c)
   if (!key) {
     return c.json({ ok: false, error: 'No API key configured.' }, 400)
   }
 
   try {
-    const discovery = await discoverWorkingModel(key)
+    const discovery = await discoverWorkingModel(key, session)
     if (discovery.model) {
       return c.json({
         ok: true,
-        message: `Connected successfully â€” ${discovery.model}`,
+        message: `Connected successfully — ${discovery.model}`,
       })
     }
 
