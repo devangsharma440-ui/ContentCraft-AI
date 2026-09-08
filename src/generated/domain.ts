@@ -36,10 +36,7 @@ export class UserStore {
   private pendingUpdates = new Set<string>()
 
   constructor() {
-    makeAutoObservable(this, {
-      pendingDeletes: false,
-      pendingUpdates: false,
-    })
+    makeAutoObservable(this, {}, { autoBind: true })
   }
 
   // === Getters ===

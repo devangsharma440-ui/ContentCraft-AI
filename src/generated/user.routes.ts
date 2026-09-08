@@ -164,7 +164,7 @@ export function createUserRoutes(): Hono {
         prisma.user.findMany({
           where,
           include,
-          orderBy,
+          orderBy: orderBy as any,
           take: query.limit ? parseInt(query.limit) : undefined,
           skip: query.offset ? parseInt(query.offset) : undefined,
         }),
@@ -234,7 +234,7 @@ export function createUserRoutes(): Hono {
       }
 
       const item = await prisma.user.create({
-        data: picked.data,
+        data: picked.data as any,
       })
 
       // Apply afterCreate hook
@@ -268,7 +268,7 @@ export function createUserRoutes(): Hono {
         }
       }
 
-      // Same allowlist filter as on create — see pickWritableFields above.
+      // Same allowlist filter as on create â€” see pickWritableFields above.
       const picked = pickWritableFields(body)
       if (!picked.ok) {
         return sendJson(c, { error: picked.error }, 400)
@@ -276,7 +276,7 @@ export function createUserRoutes(): Hono {
 
       const item = await prisma.user.update({
         where: { id },
-        data: picked.data,
+        data: picked.data as any,
       })
 
       // Apply afterUpdate hook

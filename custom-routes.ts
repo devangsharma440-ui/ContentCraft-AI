@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 
 const app = new Hono()
 
-// ── In-memory user API key (server-side only, never serialized) ──────────────
+// â”€â”€ In-memory user API key (server-side only, never serialized) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let userApiKey: string | null = null
 
@@ -10,21 +10,15 @@ function getActiveKey(): string | null {
   return userApiKey || process.env.GEMINI_API_KEY || null
 }
 
-// ── Gemini Helper ────────────────────────────────────────────────────────────
+// â”€â”€ Gemini Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type DemoType = 'generate' | 'linkedin' | 'rewrite' | 'seo' | 'youtube'
 
 // Priority-ordered list of current stable text-capable models.
 // Only active, non-deprecated models. No image/audio/embedding/video models.
 const MODEL_CANDIDATES = [
-  'gemini-3.8-flash',
   'gemini-3.7-flash',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
 ]
-
 // Cache the first model that works for the current API key.
 // Reset when key changes.
 let cachedWorkingModel: string | null = null
@@ -55,9 +49,7 @@ function classifyGeminiError(status: number, geminiError: string): string {
   return `Gemini connection failed (HTTP ${status}).`
 }
 
-async function callGeminiWithModel(
-  prompt: string, model: string, apiKey: string
-): Promise<{ text: string }> {
+async function callGeminiWithModel(model: string, apiKey: string, prompt: string) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
@@ -67,8 +59,11 @@ async function callGeminiWithModel(
         'x-goog-api-key': apiKey,
       },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 8192 },
+        contents: [
+          {
+            parts: [{ text: prompt }],
+          },
+        ],
       }),
     }
   )
@@ -76,12 +71,21 @@ async function callGeminiWithModel(
   if (!res.ok) {
     const status = res.status
     let geminiError = ''
+
     try {
-      const errBody = await res.json()
-      geminiError = errBody?.error?.message || JSON.stringify(errBody)
+      const responseText = await res.text()
+      if (responseText.trim()) {
+        try {
+          const errBody = JSON.parse(responseText)
+          geminiError = errBody?.error?.message || JSON.stringify(errBody)
+        } catch {
+          geminiError = responseText
+        }
+      }
     } catch {
-      try { geminiError = await res.text() } catch { geminiError = 'Could not read error body' }
+      geminiError = 'Could not read error body'
     }
+
     const err: any = new Error(classifyGeminiError(status, geminiError))
     err.status = status
     err.geminiError = geminiError
@@ -89,8 +93,30 @@ async function callGeminiWithModel(
     throw err
   }
 
-  const data = await res.json()
+  const responseText = await res.text()
+
+  if (!responseText.trim()) {
+    const err: any = new Error('Gemini returned an empty response.')
+    err.status = res.status
+    err.geminiError = 'Empty response body'
+    err.model = model
+    throw err
+  }
+
+  let data: any
+
+  try {
+    data = JSON.parse(responseText)
+  } catch {
+    const err: any = new Error('Gemini returned an invalid response.')
+    err.status = res.status
+    err.geminiError = responseText
+    err.model = model
+    throw err
+  }
+
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+
   if (!text) {
     const err: any = new Error('Gemini returned an empty response.')
     err.status = 200
@@ -98,9 +124,9 @@ async function callGeminiWithModel(
     err.model = model
     throw err
   }
+
   return { text }
 }
-
 // Probe a single model with a minimal request (3 tokens max).
 // Returns the HTTP status code (200 = works, 403 = auth error, 404 = model not found, etc.)
 async function probeModel(model: string, apiKey: string): Promise<number> {
@@ -223,7 +249,7 @@ async function callGemini(
   }
 }
 
-// ── Demo Mode Content Generator ──────────────────────────────────────────────
+// â”€â”€ Demo Mode Content Generator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateDemoContent(type: DemoType, userInput: string): string {
   const topic = userInput.trim()
@@ -231,14 +257,14 @@ function generateDemoContent(type: DemoType, userInput: string): string {
   switch (type) {
     case 'linkedin': {
       const lines = topic.split('\n').filter((l) => l.trim())
-      const points = lines.map((l) => `• ${l.trim()}`).join('\n')
+      const points = lines.map((l) => `â€¢ ${l.trim()}`).join('\n')
       return `I recently went through an experience that changed my perspective.
 
 ${points}
 
 Here's what I learned from it:
 
-Every step forward — no matter how small — is worth celebrating. The journey isn't always smooth, but the growth that comes from showing up every day is something no one can take away from you.
+Every step forward â€” no matter how small â€” is worth celebrating. The journey isn't always smooth, but the growth that comes from showing up every day is something no one can take away from you.
 
 I'm grateful for the people who supported me along the way, and I'm excited for what's next.
 
@@ -266,7 +292,7 @@ Related Keywords:
 ${related}
 
 H1:
-${topic} — Everything You Need to Know in 2026
+${topic} â€” Everything You Need to Know in 2026
 
 H2 Suggestions:
 1. Why ${topic} Matters More Than Ever
@@ -297,53 +323,53 @@ Estimated SEO Score: 74/100`
     case 'youtube': {
       const topicWords = topic.split(/\s+/).slice(0, 5).join(' ')
       return `5 Title Ideas:
-1. ${topic} — The Complete Beginner's Guide
+1. ${topic} â€” The Complete Beginner's Guide
 2. How to Master ${topic} in 2026 (Step by Step)
-3. I Tried ${topic} for 30 Days — Here's What Happened
+3. I Tried ${topic} for 30 Days â€” Here's What Happened
 4. ${topic}: Everything You NEED to Know Before You Start
 5. The ${topic} Blueprint That Actually Works
 
 Hook (First 15 Seconds):
-"If you've been trying to figure out ${topic} and nothing seems to work — you're in the right place. In this video, I'm going to break down exactly what you need to do, step by step, so you can start seeing real results."
+"If you've been trying to figure out ${topic} and nothing seems to work â€” you're in the right place. In this video, I'm going to break down exactly what you need to do, step by step, so you can start seeing real results."
 
 Script:
 
-[INTRO — 0:00]
+[INTRO â€” 0:00]
 Hey everyone, welcome back to the channel! If you're new here, we break down complex topics into simple, actionable steps. Today we're diving deep into ${topicWords}.
 
-[SECTION 1 — THE PROBLEM — 1:00]
+[SECTION 1 â€” THE PROBLEM â€” 1:00]
 Here's the thing most people get wrong about ${topic}: they overcomplicate it. They try to do everything at once and end up overwhelmed. Sound familiar?
 
-[SECTION 2 — THE FRAMEWORK — 3:00]
+[SECTION 2 â€” THE FRAMEWORK â€” 3:00]
 Let me share a simple framework that changed everything for me. It has three parts:
 
-Step 1: Start with the basics — understand the fundamentals before trying advanced techniques.
-Step 2: Take consistent action — small daily steps beat occasional bursts of effort.
-Step 3: Measure and adjust — track what works and double down on it.
+Step 1: Start with the basics â€” understand the fundamentals before trying advanced techniques.
+Step 2: Take consistent action â€” small daily steps beat occasional bursts of effort.
+Step 3: Measure and adjust â€” track what works and double down on it.
 
-[SECTION 3 — PRACTICAL TIPS — 7:00]
+[SECTION 3 â€” PRACTICAL TIPS â€” 7:00]
 Now let me give you some practical tips you can implement today:
 
 Tip 1: Focus on one thing at a time. Don't try to master everything at once.
 Tip 2: Set realistic goals. Progress is progress, no matter how small.
 Tip 3: Learn from others who've been where you are.
 
-[SUMMARY — 12:00]
+[SUMMARY â€” 12:00]
 To recap: start with the fundamentals, take consistent daily action, measure your results, and keep improving.
 
-[CTA — 13:00]
-If this was helpful, smash that like button and subscribe — it really helps the channel. Drop a comment below telling me which tip you're going to try first. I read every single comment.
+[CTA â€” 13:00]
+If this was helpful, smash that like button and subscribe â€” it really helps the channel. Drop a comment below telling me which tip you're going to try first. I read every single comment.
 
 Video Description:
 In this video, I break down ${topic} into simple, actionable steps. Whether you're a complete beginner or looking to level up, this guide covers everything you need to know.
 
-⏰ Timestamps:
-0:00 — Introduction
-1:00 — The Problem
-3:00 — The Framework
-7:00 — Practical Tips
-12:00 — Summary
-13:00 — Final Thoughts
+â° Timestamps:
+0:00 â€” Introduction
+1:00 â€” The Problem
+3:00 â€” The Framework
+7:00 â€” Practical Tips
+12:00 â€” Summary
+13:00 â€” Final Thoughts
 
 #${topicWords.replace(/\s+/g, '')} #Tutorial #Guide #Beginner #Tips
 
@@ -397,9 +423,9 @@ In this ${contentType}, we'll explore the key aspects, practical strategies, and
 
 The significance of ${topic} cannot be overstated. Here are the key reasons it deserves your attention:
 
-1. **Relevance** — ${topic} is at the forefront of current trends and will continue to shape the landscape for years to come.
-2. **Impact** — Understanding and applying the principles of ${topic} can lead to measurable improvements in your results.
-3. **Opportunity** — Those who master ${topic} early gain a significant competitive advantage.
+1. **Relevance** â€” ${topic} is at the forefront of current trends and will continue to shape the landscape for years to come.
+2. **Impact** â€” Understanding and applying the principles of ${topic} can lead to measurable improvements in your results.
+3. **Opportunity** â€” Those who master ${topic} early gain a significant competitive advantage.
 
 ## Key Principles
 
@@ -414,23 +440,23 @@ Track your progress, learn from your data, and be willing to adjust your approac
 
 ## Practical Tips
 
-- **Set specific, measurable goals** — Vague intentions lead to vague results. Be precise about what you want to achieve.
-- **Build systems, not just goals** — Goals define the destination; systems get you there. Focus on repeatable processes.
-- **Learn from others** — Study what works for people who've achieved what you're aiming for. Model their approaches and adapt them to your situation.
-- **Stay patient** — Meaningful results take time. Trust the process and keep showing up.
+- **Set specific, measurable goals** â€” Vague intentions lead to vague results. Be precise about what you want to achieve.
+- **Build systems, not just goals** â€” Goals define the destination; systems get you there. Focus on repeatable processes.
+- **Learn from others** â€” Study what works for people who've achieved what you're aiming for. Model their approaches and adapt them to your situation.
+- **Stay patient** â€” Meaningful results take time. Trust the process and keep showing up.
 
 ## Conclusion
 
 ${topic} offers tremendous potential for those willing to put in the work. By understanding the fundamentals, developing a clear strategy, and executing consistently, you'll be well on your way to achieving your goals.
 
-The key is to start now. Don't wait for perfect conditions — they'll never come. Take the first step today, and adjust as you go.
+The key is to start now. Don't wait for perfect conditions â€” they'll never come. Take the first step today, and adjust as you go.
 
 *What's your experience with ${topic}? Share your thoughts in the comments below.*`
     }
   }
 }
 
-// ── Routes ──────────────────────────────────────────────────────────────────
+// â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function safeCallGemini(
   prompt: string, demoType: DemoType, userInput: string
@@ -516,7 +542,7 @@ Language: ${language || 'English'}
 Rules:
 - Start with a strong, attention-grabbing hook (first line)
 - Write short paragraphs (1-3 sentences each)
-- Use natural, human tone — professional but not robotic
+- Use natural, human tone â€” professional but not robotic
 - Do NOT invent facts, achievements, or statistics the user did not provide
 - Do NOT add fake experiences or statistics
 - End with a clear call-to-action (question, invitation to share, etc.)
@@ -558,7 +584,7 @@ app.post('/rewrite', async (c) => {
 Original content:
 "${content}"
 
-Write the improved version now. Do not add explanations — just provide the rewritten content.`
+Write the improved version now. Do not add explanations â€” just provide the rewritten content.`
 
   const result = await safeCallGemini(prompt, 'rewrite', content)
   if (result.error) return c.json({ error: result.error }, 401)
@@ -611,7 +637,7 @@ Video Length: ${videoLength || '10 minutes'}
 
 Provide ALL of the following:
 1. 5 Title Ideas (engaging, clickable, SEO-friendly)
-2. Hook (the first 15 seconds — grab attention immediately)
+2. Hook (the first 15 seconds â€” grab attention immediately)
 3. Complete Video Script with:
    - Intro (hook + what the video is about)
    - Main content sections with clear transitions
@@ -627,7 +653,7 @@ Format clearly with section headers. Make the content engaging and optimized for
   return c.json({ content: result.content, demo: result.demo })
 })
 
-// ── Settings Routes ─────────────────────────────────────────────────────────
+// â”€â”€ Settings Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Status: never returns the actual key, only whether one is set
 app.get('/settings/status', (c) => {
@@ -677,7 +703,7 @@ app.post('/settings/test', async (c) => {
     if (discovery.model) {
       return c.json({
         ok: true,
-        message: `Connected successfully — ${discovery.model}`,
+        message: `Connected successfully â€” ${discovery.model}`,
       })
     }
 
