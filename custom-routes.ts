@@ -258,63 +258,86 @@ async function probeModel(model: string, apiKey: string): Promise<number> {
 
 // Discover the first working model for the given API key.
 // Returns { model, error? }
-// Stops immediately on 401/403 (Auth Error) or 429 (Rate Limit).
-// Continues to next candidate only on 404 (Model Not Found).
+// Bounded fallback behavior:
+// - Probes cached model first (if not excluded)
+// - Stops immediately on 401/403 (Auth Error)
+// - Cascades on 404 (Model Not Found) or 429 (Model Rate Limit exceeded on that specific model)
+// - Maximum one attempt per candidate in MODEL_CANDIDATES
 async function discoverWorkingModel(
   apiKey: string,
-  session?: UserSession
+  session?: UserSession,
+  excludedModels: Set<string> = new Set<string>()
 ): Promise<{ model: string | null; error?: string }> {
-  const isEnvKey = apiKey === process.env.GEMINI_API_KEY
+  const isEnvKey = apiKey === process.env.GEMINI_API_KEY;
 
-  // Check cached model
+  // Track if we had a cached model that was invalidated
+  let cacheInvalidated = false;
+
+  // 1. Check cached model first if not excluded
   const cachedModel = session?.cachedWorkingModel && session.cachedModelKey === apiKey
     ? session.cachedWorkingModel
     : isEnvKey && envModelCache?.key === apiKey
       ? envModelCache.model
-      : null
+      : null;
 
-  if (cachedModel) {
-    const status = await probeModel(cachedModel, apiKey)
-    if (status === 200) return { model: cachedModel }
+  if (cachedModel && !excludedModels.has(cachedModel)) {
+    const status = await probeModel(cachedModel, apiKey);
+    if (status === 200) return { model: cachedModel };
 
-    // If cached model is no longer working (e.g. 404), invalidate
+    // Invalidate cache and mark as invalidated
+    excludedModels.add(cachedModel);
     if (session) {
-      session.cachedWorkingModel = null
-      session.cachedModelKey = null
+      session.cachedWorkingModel = null;
+      session.cachedModelKey = null;
     }
     if (isEnvKey) {
-      envModelCache = null
+      envModelCache = null;
     }
+    cacheInvalidated = true;
   }
 
+  let encounteredRateLimit = false;
+
+  // 2. Scan candidate list with bounded single-pass
   for (const model of MODEL_CANDIDATES) {
-    const status = await probeModel(model, apiKey)
+    if (excludedModels.has(model)) continue;
+
+    const status = await probeModel(model, apiKey);
+    excludedModels.add(model);
 
     if (status === 200) {
-      if (session) {
-        session.cachedWorkingModel = model
-        session.cachedModelKey = apiKey
+      // Success: cache working model only if we didn't just invalidate a prior cache
+      if (!cacheInvalidated) {
+        if (session) {
+          session.cachedWorkingModel = model;
+          session.cachedModelKey = apiKey;
+        }
+        if (isEnvKey) {
+          envModelCache = { model, key: apiKey };
+        }
       }
-      if (isEnvKey) {
-        envModelCache = { model, key: apiKey }
-      }
-      return { model }
+      return { model };
     }
 
-    // Auth error: stop immediately. Rotating models will not fix invalid/unauthorized keys.
+    // 401 / 403: Auth / Permission error. Stop immediately.
     if (status === 401 || status === 403) {
-      return { model: null, error: 'API key is invalid or does not have permission to use Gemini.' }
+      return { model: null, error: 'API key is invalid or does not have permission to use Gemini.' };
     }
 
-    // Rate limit: stop immediately. Do not burn quota rotating models.
+    // 429: Rate limit hit on this specific model.
     if (status === 429) {
-      return { model: null, error: 'Gemini quota/rate limit reached. Please try again later.' }
+      encounteredRateLimit = true;
+      continue;
     }
 
-    // 404: model not supported on this project/tier -> try next model in candidate list.
+    // Other errors: continue
   }
 
-  return { model: null, error: 'No compatible Gemini text model is available for this API key.' }
+  if (encounteredRateLimit) {
+    return { model: null, error: 'Gemini quota/rate limit reached. Please try again later.' };
+  }
+
+  return { model: null, error: 'No compatible Gemini text model is available for this API key.' };
 }
 
 // Classify the error for user-facing messages based on HTTP status.
@@ -337,65 +360,88 @@ async function callGemini(
     return { text: generateDemoContent(demoType, userInput), demo: true }
   }
 
-  const discovery = await discoverWorkingModel(apiKey, session)
-  if (!discovery.model) {
-    if (discovery.error?.includes('invalid') || discovery.error?.includes('permission')) {
-      const err: any = new Error('AUTH_ERROR')
-      err.status = 403
-      throw err
-    }
-    if (discovery.error?.includes('rate limit') || discovery.error?.includes('quota')) {
-      const err: any = new Error('RATE_LIMIT')
-      err.status = 429
-      throw err
-    }
-    if (discovery.error?.includes('Network')) {
-      const err: any = new Error('NETWORK_ERROR')
-      err.status = 0
-      throw err
-    }
-    const err: any = new Error('NO_MODEL')
-    err.status = 404
-    throw err
-  }
+  const isEnvKey = apiKey === process.env.GEMINI_API_KEY
+  const attemptedModels = new Set<string>()
+  let lastErrorType: string | null = null; let rateLimitEncountered = false
 
-  try {
-    return { text: (await callGeminiWithModel(discovery.model, apiKey, prompt)).text, demo: false }
-  } catch (e: any) {
-    // If runtime call returns 404 on the selected model, clear cache and try discovering a fallback
-    if (e?.status === 404) {
+  // Bounded attempt loop: at most MODEL_CANDIDATES.length attempts across candidates
+  while (attemptedModels.size < MODEL_CANDIDATES.length) {
+    const discovery = await discoverWorkingModel(apiKey, session, attemptedModels)
+    if (!discovery.model) {
+      if (discovery.error?.includes('invalid') || discovery.error?.includes('permission')) {
+        const err: any = new Error('AUTH_ERROR')
+        err.status = 403
+        throw err
+      }
+      if (discovery.error?.includes('rate limit') || discovery.error?.includes('quota')) {
+        const err: any = new Error('RATE_LIMIT')
+        err.status = 429
+        throw err
+      }
+      if (discovery.error?.includes('Network')) {
+        const err: any = new Error('NETWORK_ERROR')
+        err.status = 0
+        throw err
+      }
+      const err: any = new Error('NO_MODEL')
+      err.status = 404
+      throw err
+    }
+
+    const currentModel = discovery.model
+    attemptedModels.add(currentModel)
+
+    try {
+      const response = await callGeminiWithModel(currentModel, apiKey, prompt)
+      return { text: response.text, demo: false }
+    } catch (e: any) {
+      const status = e?.status || 0
+      const errType = classifyError(status)
+
+      // Auth error: abort immediately, do not rotate
+      if (errType === 'AUTH_ERROR') {
+        const authErr: any = new Error('AUTH_ERROR')
+        authErr.status = 401
+        throw authErr
+      }
+
+      // Invalidate cache for the failing model
       if (session) {
         session.cachedWorkingModel = null
         session.cachedModelKey = null
       }
-      if (apiKey === process.env.GEMINI_API_KEY) {
+      if (isEnvKey) {
         envModelCache = null
       }
-      const retryDiscovery = await discoverWorkingModel(apiKey, session)
-      if (retryDiscovery.model && retryDiscovery.model !== discovery.model) {
-        try {
-          return { text: (await callGeminiWithModel(retryDiscovery.model, apiKey, prompt)).text, demo: false }
-        } catch {
-          // fallback to standard error classification below
-        }
-      }
-    }
 
-    const errType = classifyError(e?.status || 0)
-    if (errType === 'AUTH_ERROR') {
-      const authErr: any = new Error('AUTH_ERROR')
-      throw authErr
+      lastErrorType = errType
+
+      // 404, 429, 5xx, network error: continue to next candidate in bounded loop
+      if (status === 429) {
+        rateLimitEncountered = true;
+      }
+      if (status === 404 || status === 429 || status >= 500 || status === 0) {
+        continue;
+      }
+
+      throw e
     }
-    if (errType === 'RATE_LIMIT') {
-      const rateErr: any = new Error('RATE_LIMIT')
-      throw rateErr
-    }
-    if (errType === 'SERVICE_ERROR') {
-      const svcErr: any = new Error('SERVICE_ERROR')
-      throw svcErr
-    }
-    throw e
   }
+
+  // All candidates exhausted
+  if (rateLimitEncountered) {
+    const rateErr: any = new Error('RATE_LIMIT')
+    rateErr.status = 429
+    throw rateErr
+  }
+  if (lastErrorType === 'SERVICE_ERROR') {
+    const svcErr: any = new Error('SERVICE_ERROR')
+    svcErr.status = 503
+    throw svcErr
+  }
+  const noModelErr: any = new Error('NO_MODEL')
+  noModelErr.status = 404
+  throw noModelErr
 }
 
 // â”€â”€ Demo Mode Content Generator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -612,7 +658,7 @@ async function safeCallGemini(
   prompt: string,
   demoType: DemoType,
   userInput: string
-): Promise<{ content: string; demo: boolean; error?: string; workingModel?: string }> {
+): Promise<{ content: string; demo: boolean; error?: string; status?: number; workingModel?: string }> {
   const session = getSession(c)
   try {
     const result = await callGemini(c, prompt, demoType, userInput)
@@ -622,6 +668,7 @@ async function safeCallGemini(
       return {
         content: '',
         demo: false,
+        status: 401,
         error: 'API key is invalid or does not have permission to use Gemini.',
       }
     }
@@ -629,6 +676,7 @@ async function safeCallGemini(
       return {
         content: '',
         demo: false,
+        status: 429,
         error: 'Gemini quota/rate limit reached. Please try again later.',
       }
     }
@@ -636,6 +684,7 @@ async function safeCallGemini(
       return {
         content: '',
         demo: false,
+        status: 503,
         error: 'Gemini service is temporarily unavailable.',
       }
     }
@@ -643,12 +692,15 @@ async function safeCallGemini(
       return {
         content: '',
         demo: false,
+        status: 404,
         error: 'No Gemini text model is available for this API key.',
       }
     }
     return { content: generateDemoContent(demoType, userInput), demo: true }
   }
 }
+
+export { discoverWorkingModel, callGemini, safeCallGemini };
 
 app.get('/health', (c) => c.json({ status: 'ok', hasApiKey: !!getActiveKey(c) }))
 
@@ -673,7 +725,7 @@ Requirements:
 Write the complete content now. Do not include any meta-commentary, just the content itself.`
 
   const result = await safeCallGemini(c, prompt, 'generate', keyPoints)
-  if (result.error) return c.json({ error: result.error }, 401)
+  if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
   return c.json({ content: result.content, demo: result.demo })
 })
 
@@ -707,7 +759,7 @@ Rules:
 Write the LinkedIn post now.`
 
   const result = await safeCallGemini(c, prompt, 'linkedin', points)
-  if (result.error) return c.json({ error: result.error }, 401)
+  if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
   return c.json({ content: result.content, demo: result.demo })
 })
 
@@ -740,7 +792,7 @@ Original content:
 Write the improved version now. Do not add explanations — just provide the rewritten content.`
 
   const result = await safeCallGemini(c, prompt, 'rewrite', content)
-  if (result.error) return c.json({ error: result.error }, 401)
+  if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
   return c.json({ content: result.content, demo: result.demo })
 })
 
@@ -770,7 +822,7 @@ Provide ALL of the following:
 Format the output clearly with labels and line breaks. Be specific and actionable.`
 
   const result = await safeCallGemini(c, prompt, 'seo', topic)
-  if (result.error) return c.json({ error: result.error }, 401)
+  if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
   return c.json({ content: result.content, demo: result.demo })
 })
 
@@ -802,7 +854,7 @@ Provide ALL of the following:
 Format clearly with section headers. Make the content engaging and optimized for YouTube's algorithm.`
 
   const result = await safeCallGemini(c, prompt, 'youtube', topic)
-  if (result.error) return c.json({ error: result.error }, 401)
+  if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
   return c.json({ content: result.content, demo: result.demo })
 })
 
