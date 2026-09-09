@@ -444,10 +444,18 @@ async function callGemini(
   throw noModelErr
 }
 
-// â”€â”€ Demo Mode Content Generator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ————————————————————————————————————————————————————————————————
 
 function generateDemoContent(type: DemoType, userInput: string): string {
-  const topic = userInput.trim()
+  const topic = userInput.trim();
+
+  // Language detection based on script characters in the userInput (keyPoints)
+  if (/[\u0900-\u097F]/.test(userInput)) {
+    return generateHindiDemo(userInput);
+  }
+  if (/[\u0A80-\u0AFF]/.test(userInput)) {
+    return generateGujaratiDemo(userInput);
+  }
 
   switch (type) {
     case 'linkedin': {
@@ -655,6 +663,51 @@ The key is to start now. Don't wait for perfect conditions â€” they'll neve
   }
 }
 
+function generateHindiDemo(userInput: string): string {
+  const topic = userInput.trim();
+  return `# ${topic}
+
+## परिचय
+
+${topic} आज के तेज़ी से बदलते परिदृश्य में एक महत्वपूर्ण विषय है। यह आपके लक्ष्यों को प्राप्त करने में बड़ी मदद कर सकता है।
+
+## क्यों ${topic} महत्वपूर्ण है
+- **संबंधितता** — यह वर्तमान रुझानों के अग्रभाग में है।
+- **प्रभाव** — इसे समझने और लागू करने से परिणामों में सुधार हो सकता है।
+- **अवसर** — जो लोग जल्दी इसका महारत हासिल करते हैं, उन्हें प्रतिस्पर्धात्मक बढ़त मिलती है।
+
+## मुख्य सिद्धांत
+- स्पष्ट रणनीति बनाएं।
+- निरंतर कार्य को प्राथमिकता दें।
+- प्रगति को मापें और अनुकूलित करें।
+
+## निष्कर्ष
+${topic} का महत्व कम नहीं आंका जा सकता। इसे अपनाने से आप सफल हो सकते हैं।`;
+}
+
+function generateGujaratiDemo(userInput: string): string {
+  const topic = userInput.trim();
+  return `# ${topic}
+
+## પરિચય
+
+${topic} આજના ઝડપી બદલાતા પરિસ્થિતિમાં મહત્વપૂર્ણ વિષય છે. સમજીને અને લાગુ કરીને તમે તમારા લક્ષ્યો હાંસલ કરી શકો છો.
+
+## શા માટે ${topic} મહત્વનું છે
+- **સંબદ્ધતા** — આ વર્તમાન ટ્રેન્ડ્સમાં અગ્રવાણી ધરાવે છે.
+- **પ્રભાવ** — તેને સમજવાથી અને ઉપયોગ કરીને પરિણામો સુધરી શકે છે.
+- **અવસર** — જલદી માંજ આમાં નિપુણતા મેળવનારાઓને સ્પર્ધાત્મક ફાયદો મળે છે.
+
+## મુખ્ય સિદ્ધાંત
+- સ્પષ્ટ સ્ટ્રેટેજી બનાવો.
+- સતત એક્ઝિક્યુશન પર ભાર આપો.
+- પ્રગતિ માપો અને એડજસ્ટ કરો.
+
+## નિષ્કર્ષ
+${topic}નું મહત્વ અનમોલ છે. તેને અપનાવીને તમે સફળતા મેળવી શકો છો.`;
+}
+
+
 // â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function safeCallGemini(
@@ -663,44 +716,24 @@ async function safeCallGemini(
   demoType: DemoType,
   userInput: string
 ): Promise<{ content: string; demo: boolean; error?: string; status?: number; workingModel?: string }> {
-  const session = getSession(c)
+  const session = getSession(c);
   try {
-    const result = await callGemini(c, prompt, demoType, userInput)
-    return { content: result.text, demo: result.demo, workingModel: session.cachedWorkingModel || undefined }
+    const result = await callGemini(c, prompt, demoType, userInput);
+    return { content: result.text, demo: result.demo, workingModel: session.cachedWorkingModel || undefined };
   } catch (e: any) {
     if (e?.message === 'AUTH_ERROR') {
-      return {
-        content: '',
-        demo: false,
-        status: 401,
-        error: 'API key is invalid or does not have permission to use Gemini.',
-      }
+      return { content: '', demo: false, status: 401, error: 'API key is invalid or does not have permission to Gemini.' };
     }
     if (e?.message === 'RATE_LIMIT') {
-      return {
-        content: '',
-        demo: false,
-        status: 429,
-        error: 'Gemini quota/rate limit reached. Please try again later.',
-      }
+      return { content: '', demo: false, status: 429, error: 'Gemini quota/rate limit reached. Please try again later.' };
     }
     if (e?.message === 'SERVICE_ERROR') {
-      return {
-        content: '',
-        demo: false,
-        status: 503,
-        error: 'Gemini service is temporarily unavailable.',
-      }
+      return { content: '', demo: false, status: 503, error: 'Gemini service is temporarily unavailable.' };
     }
     if (e?.message === 'NO_MODEL') {
-      return {
-        content: '',
-        demo: false,
-        status: 404,
-        error: 'No Gemini text model is available for this API key.',
-      }
+      return { content: '', demo: false, status: 404, error: 'No Gemini text model is available for this API key.' };
     }
-    return { content: generateDemoContent(demoType, userInput), demo: true }
+    return { content: generateDemoContent(demoType, userInput), demo: true };
   }
 }
 
@@ -716,13 +749,15 @@ app.post('/generate', async (c) => {
     return c.json({ error: 'Please provide key points or a topic.' }, 400)
   }
 
-  const prompt = `You are a professional content writer. Create a ${contentType || 'blog post'} based on these key points:
+  const prompt = `You are a professional content writer.
+IMPORTANT: Write the entire content in ${language || 'English'} language.
+
+Create a ${contentType || 'blog post'} based on these key points:
 
 "${keyPoints}"
 
 Requirements:
 - Tone: ${tone || 'Professional'}
-- Language: ${language || 'English'}
 - Length: ${length || 'Medium'} (Short=200 words, Medium=500 words, Long=1000 words)
 - Target Audience: ${targetAudience || 'General audience'}
 

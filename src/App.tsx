@@ -11,13 +11,14 @@ import { SEOTool } from '@/components/SEOTool'
 import { YouTubeTool } from '@/components/YouTubeTool'
 import { History, type HistoryItem } from '@/components/History'
 import { Settings } from '@/components/Settings'
+import { Landing } from '@/components/Landing'
 import { cn } from '@/lib/cn'
 import {
   Pen, Linkedin, RefreshCw, Search, Youtube,
   History as HistoryIcon, Moon, Sun, Menu, LayoutDashboard, SettingsIcon
 } from 'lucide-react'
 
-type View = 'dashboard' | 'writer' | 'linkedin' | 'rewrite' | 'seo' | 'youtube' | 'history' | 'settings'
+type View = 'landing' | 'dashboard' | 'writer' | 'linkedin' | 'rewrite' | 'seo' | 'youtube' | 'history' | 'settings'
 
 const navItems: { id: View; label: string; icon: typeof Pen }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -31,7 +32,7 @@ const navItems: { id: View; label: string; icon: typeof Pen }[] = [
 ]
 
 export default function App() {
-  const [view, setView] = useState<View>('dashboard')
+  const [view, setView] = useState<View>('landing')
   const [dark, setDark] = useState(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('contentcraft-dark')
@@ -62,15 +63,26 @@ export default function App() {
 
   const renderView = () => {
     switch (view) {
-      case 'dashboard': return <Dashboard onNavigate={(id) => setView(id as View)} />
-      case 'writer': return <ContentWriter onSave={saveToHistory} />
-      case 'linkedin': return <LinkedInGenerator onSave={saveToHistory} />
-      case 'rewrite': return <RewriteTool onSave={saveToHistory} />
-      case 'seo': return <SEOTool onSave={saveToHistory} />
-      case 'youtube': return <YouTubeTool onSave={saveToHistory} />
-      case 'history': return <History />
-      case 'settings': return <Settings />
-      default: return <Dashboard onNavigate={(id) => setView(id as View)} />
+      case 'landing':
+        return <Landing onStart={() => setView('dashboard')} />
+      case 'dashboard':
+        return <Dashboard onNavigate={(id) => setView(id as View)} />
+      case 'writer':
+        return <ContentWriter onSave={saveToHistory} />
+      case 'linkedin':
+        return <LinkedInGenerator onSave={saveToHistory} />
+      case 'rewrite':
+        return <RewriteTool onSave={saveToHistory} />
+      case 'seo':
+        return <SEOTool onSave={saveToHistory} />
+      case 'youtube':
+        return <YouTubeTool onSave={saveToHistory} />
+      case 'history':
+        return <History />
+      case 'settings':
+        return <Settings />
+      default:
+        return <Dashboard onNavigate={(id) => setView(id as View)} />
     }
   }
 

@@ -41,7 +41,7 @@ export function ContentWriter({ onSave }: { onSave: (item: { title: string; cont
     setError('')
     setLoading(true)
     try {
-      const res = await fetch('/api/generate', {
+      const res = await fetch('/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyPoints, contentType, tone, language, length, targetAudience: audience }),
