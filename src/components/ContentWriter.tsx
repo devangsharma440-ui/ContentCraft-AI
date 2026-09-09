@@ -10,7 +10,7 @@ import { Pen, Loader2 } from 'lucide-react'
 
 const contentTypes = ['Blog Post', 'Article', 'Email', 'Website Copy', 'Product Description', 'Ad Copy', 'Social Media Post', 'YouTube Script']
 const tones = ['Professional', 'Casual', 'Friendly', 'Formal', 'Humorous', 'Persuasive', 'Inspirational']
-const languages = ['English', 'Hindi', 'Hinglish', 'Spanish', 'French', 'German']
+const languages = ['English', 'Hindi', 'Hinglish', 'Gujarati', 'Spanish', 'French', 'German']
 const lengths = ['Short', 'Medium', 'Long']
 const audiences = ['General', 'Students', 'Professionals', 'Entrepreneurs', 'Marketers', 'Tech Enthusiasts', 'Kids']
 
