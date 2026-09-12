@@ -4,6 +4,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { apiFetch } from '@/lib/api'
 import { Settings as SettingsIcon, Eye, EyeOff, Save, Trash2, Plug, CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 interface KeyStatus {
@@ -28,7 +29,7 @@ export function Settings() {
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch('/api/settings/status')
+      const res = await apiFetch('/api/settings/status')
       const data = await res.json()
       setStatus(data)
     } catch {
@@ -48,7 +49,7 @@ export function Settings() {
     setSaving(true)
     setMsg(null)
     try {
-      const res = await fetch('/api/settings/key', {
+      const res = await apiFetch('/api/settings/key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: key.trim() }),
@@ -73,7 +74,7 @@ export function Settings() {
     setRemoving(true)
     setMsg(null)
     try {
-      const res = await fetch('/api/settings/key', { method: 'DELETE' })
+      const res = await apiFetch('/api/settings/key', { method: 'DELETE' })
       const data = await res.json()
       if (res.ok) {
         setMsg({ type: 'success', text: data.message || 'Key removed.' })
@@ -92,7 +93,7 @@ export function Settings() {
     setTesting(true)
     setMsg(null)
     try {
-      const res = await fetch('/api/settings/test', {
+      const res = await apiFetch('/api/settings/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })

@@ -4,7 +4,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { ResultDisplay } from './ResultDisplay'
-import { RefreshCw, Loader2 } from 'lucide-react'
+import { apiFetch, type UsageState } from '@/lib/api'
+import { RefreshCw, Loader2, Zap, AlertCircle } from 'lucide-react'
 
 const actions = [
   { id: 'improve', label: '✨ Improve', color: 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/30 dark:hover:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800' },
@@ -17,12 +18,20 @@ const actions = [
   { id: 'engaging', label: '🔥 More Engaging', color: 'bg-red-50 hover:bg-red-100 dark:bg-red-950/30 dark:hover:bg-red-950/50 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800' },
 ]
 
-export function RewriteTool({ onSave }: { onSave: (item: { title: string; content: string; type: string }) => void }) {
+interface RewriteToolProps {
+  onSave: (item: { title: string; content: string; type: string }) => void
+  usage?: UsageState | null
+  onUsageUpdate?: (newUsage: Partial<UsageState>) => void
+  onUpgradeClick?: () => void
+}
+
+export function RewriteTool({ onSave, usage, onUsageUpdate, onUpgradeClick }: RewriteToolProps) {
   const [content, setContent] = useState('')
   const [result, setResult] = useState<{ content: string; demo: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [lastAction, setLastAction] = useState('')
+  const [isQuotaExhausted, setIsQuotaExhausted] = useState(false)
   const savedIdRef = useRef('')
 
   useEffect(() => {
@@ -38,23 +47,38 @@ export function RewriteTool({ onSave }: { onSave: (item: { title: string; conten
       return
     }
     setError('')
+    setIsQuotaExhausted(false)
     setLoading(true)
     setLastAction(action)
     try {
-      const res = await fetch('/api/rewrite', {
+      const res = await apiFetch('/api/rewrite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content, action }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to rewrite content')
+      if (!res.ok) {
+        if (data.error === 'MONTHLY_LIMIT_REACHED' || res.status === 429) {
+          setIsQuotaExhausted(true)
+          if (data.used !== undefined && data.limit !== undefined) {
+            onUsageUpdate?.({ used: data.used, limit: data.limit, remaining: data.remaining })
+          }
+          throw new Error(data.message || "You've reached your monthly AI generation limit.")
+        }
+        throw new Error(data.error || 'Failed to rewrite content')
+      }
       setResult(data)
+      if (data.usage) {
+        onUsageUpdate?.(data.usage)
+      }
     } catch (e: any) {
       setError(e.message)
     } finally {
       setLoading(false)
     }
   }
+
+  const isPro = usage?.plan === 'pro'
 
   return (
     <div>
@@ -75,7 +99,34 @@ export function RewriteTool({ onSave }: { onSave: (item: { title: string; conten
             />
           </div>
 
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && (
+            <div className={`p-3 rounded-lg text-sm flex items-start gap-2 ${
+              isQuotaExhausted
+                ? 'bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-800'
+                : 'bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300'
+            }`}>
+              <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              <div className="flex-1">
+                <p>{error}</p>
+                {isQuotaExhausted && onUpgradeClick && (
+                  <Button
+                    size="sm"
+                    className="mt-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white shadow-xs text-xs h-7"
+                    onClick={onUpgradeClick}
+                  >
+                    <Zap className="h-3.5 w-3.5 mr-1 fill-white" /> Upgrade to Pro (300 generations)
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {loading && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <span>{isPro ? '⚡ Priority AI processing...' : 'Rewriting your content...'}</span>
+            </p>
+          )}
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {actions.map((a) => (

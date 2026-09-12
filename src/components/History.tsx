@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { History as HistoryIcon, Search, Trash2, Copy, Eye, X, Check, FileText } from 'lucide-react'
+import { History as HistoryIcon, Search, Trash2, Copy, Eye, Check, FileText, Zap } from 'lucide-react'
 
 export interface HistoryItem {
   id: string
@@ -15,7 +15,13 @@ export interface HistoryItem {
   date: string
 }
 
-export function History({ onOpen }: { onOpen?: (item: HistoryItem) => void }) {
+interface HistoryProps {
+  onOpen?: (item: HistoryItem) => void
+  isPro?: boolean
+  onUpgradeClick?: () => void
+}
+
+export function History({ onOpen, isPro = false, onUpgradeClick }: HistoryProps) {
   const [items, setItems] = useState<HistoryItem[]>([])
   const [search, setSearch] = useState('')
   const [viewItem, setViewItem] = useState<HistoryItem | null>(null)
@@ -23,8 +29,12 @@ export function History({ onOpen }: { onOpen?: (item: HistoryItem) => void }) {
 
   useEffect(() => {
     const saved = localStorage.getItem('contentcraft-history')
-    if (saved) setItems(JSON.parse(saved))
-  }, [])
+    if (saved) {
+      const parsed: HistoryItem[] = JSON.parse(saved)
+      const maxItems = isPro ? 1000 : 15
+      setItems(parsed.slice(0, maxItems))
+    }
+  }, [isPro])
 
   const filtered = items.filter(
     (item) =>
@@ -61,14 +71,33 @@ export function History({ onOpen }: { onOpen?: (item: HistoryItem) => void }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-2xl font-bold flex items-center gap-2">
-          <HistoryIcon className="h-6 w-6 text-amber-500" /> History
-        </h2>
-        {items.length > 0 && (
-          <Button variant="destructive" size="sm" onClick={handleClearAll}>
-            <Trash2 className="h-3.5 w-3.5 mr-1" /> Clear All
-          </Button>
-        )}
+        <div>
+          <h2 className="text-2xl font-bold flex items-center gap-2">
+            <HistoryIcon className="h-6 w-6 text-amber-500" /> History
+          </h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {isPro
+              ? 'Pro Plan: Full history enabled (up to 1,000 items)'
+              : 'Free Plan: Storing your latest 15 generations'}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {!isPro && onUpgradeClick && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs h-8 border-amber-300 dark:border-amber-800 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30"
+              onClick={onUpgradeClick}
+            >
+              <Zap className="h-3 w-3 mr-1 fill-amber-500 text-amber-500" /> Unlock Full History
+            </Button>
+          )}
+          {items.length > 0 && (
+            <Button variant="destructive" size="sm" onClick={handleClearAll} className="h-8">
+              <Trash2 className="h-3.5 w-3.5 mr-1" /> Clear All
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="relative mb-4">
@@ -110,7 +139,7 @@ export function History({ onOpen }: { onOpen?: (item: HistoryItem) => void }) {
                       </p>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setViewItem(item)}>
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => { setViewItem(item); onOpen?.(item) }}>
                         <Eye className="h-3.5 w-3.5" />
                       </Button>
                       <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleCopy(item)}>
@@ -137,7 +166,7 @@ export function History({ onOpen }: { onOpen?: (item: HistoryItem) => void }) {
             </DialogTitle>
           </DialogHeader>
           <ScrollArea className="max-h-[50vh]">
-            <div className="whitespace-pre-wrap text-sm leading-relaxed p-4 bg-muted/30 rounded-md">
+            <div className="whitespace-pre-wrap text-sm leading-relaxed p-4 bg-muted/30 rounded-md font-mono text-foreground/90">
               {viewItem?.content}
             </div>
           </ScrollArea>

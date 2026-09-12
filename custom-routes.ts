@@ -1,5 +1,13 @@
 import { Hono, type Context } from 'hono'
 import { getCookie, setCookie } from 'hono/cookie'
+import {
+  PLAN_CONFIG,
+  getPlanConfig,
+  getMonthlyLimit,
+  getPriority,
+  type PlanType,
+  type PriorityLevel,
+} from './src/lib/plans'
 
 const app = new Hono()
 
@@ -7,7 +15,14 @@ const app = new Hono()
 // Each user/browser session gets an isolated in-memory record.
 // Keys are never sent to the client, never logged, and never persisted to disk.
 
-interface UserSession {
+export interface UserSession {
+  id?: string
+  identityKey?: string
+  clientIp?: string
+  plan?: PlanType
+  usagePeriod?: string
+  usedCount?: number
+  priority?: PriorityLevel
   userApiKey: string | null
   cachedWorkingModel: string | null
   cachedModelKey: string | null
@@ -15,9 +30,17 @@ interface UserSession {
 }
 
 const SESSION_COOKIE_NAME = 'cc_session_id'
+const CLIENT_COOKIE_NAME = 'cc_client_id'
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 const sessionStore = new Map<string, UserSession>()
+const ipToIdentityMap = new Map<string, string>()
+
+// Reset helper for automated testing
+export function _resetUsageStoreForTesting() {
+  sessionStore.clear()
+  ipToIdentityMap.clear()
+}
 
 // Prune expired sessions periodically
 function cleanupSessions() {
@@ -27,6 +50,46 @@ function cleanupSessions() {
       sessionStore.delete(id)
     }
   }
+}
+
+export function getCurrentPeriod(): string {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  return `${year}-${month}`
+}
+
+export function ensureActivePeriod(session: UserSession): void {
+  const currentPeriod = getCurrentPeriod()
+  if (!session.usagePeriod || session.usagePeriod !== currentPeriod) {
+    session.usagePeriod = currentPeriod
+    session.usedCount = 0
+  }
+}
+
+function getClientIp(c: Context): string {
+  const forwarded = c.req.header('x-forwarded-for')
+  if (forwarded) {
+    return forwarded.split(',')[0].trim()
+  }
+  const realIp = c.req.header('x-real-ip') || c.req.header('cf-connecting-ip')
+  if (realIp) return realIp.trim()
+  return '127.0.0.1'
+}
+
+function getOrCreateClientId(c: Context): string {
+  let clientId = c.req.header('x-client-id') || getCookie(c, CLIENT_COOKIE_NAME)
+  if (!clientId || clientId.length < 8) {
+    clientId = crypto.randomUUID()
+    setCookie(c, CLIENT_COOKIE_NAME, clientId, {
+      path: '/',
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
+      maxAge: 60 * 60 * 24 * 365, // 1 year
+    })
+  }
+  return clientId
 }
 
 function getOrCreateSessionId(c: Context): string {
@@ -44,27 +107,174 @@ function getOrCreateSessionId(c: Context): string {
   return sessionId
 }
 
-function getSession(c: Context): UserSession {
+/**
+ * Strong multi-layered user identification for the current ₹0 in-memory architecture:
+ * 1. Persistent client device ID (header x-client-id or cookie cc_client_id)
+ * 2. Session ID (cookie cc_session_id or header x-session-id)
+ * 3. Client IP anchor to prevent trivially bypassing quota by clearing cookies or changing headers
+ */
+export function getSession(c: Context): UserSession {
   cleanupSessions()
   const sessionId = getOrCreateSessionId(c)
+  const clientId = getOrCreateClientId(c)
+  const clientIp = getClientIp(c)
+  const currentPeriod = getCurrentPeriod()
+
+  // 1. Direct session lookup
   let session = sessionStore.get(sessionId)
+
+  // 2. If not found by sessionId, lookup by persistent clientId
+  if (!session && clientId) {
+    session = sessionStore.get(`client:${clientId}`)
+    if (session) {
+      sessionStore.set(sessionId, session)
+    }
+  }
+
+  // 3. If still not found, check IP anchor to prevent clearing cookies / header tampering bypass
+  if (!session && clientIp && clientIp !== '127.0.0.1') {
+    const anchoredId = ipToIdentityMap.get(clientIp)
+    if (anchoredId) {
+      const candidate = sessionStore.get(anchoredId)
+      if (candidate) {
+        ensureActivePeriod(candidate)
+        // If candidate already has usage recorded in this period, link session to prevent bypass
+        if (candidate.usedCount && candidate.usedCount > 0) {
+          session = candidate
+          sessionStore.set(sessionId, session)
+          if (clientId) sessionStore.set(`client:${clientId}`, session)
+        }
+      }
+    }
+  }
+
+  // 4. If brand new identity
   if (!session) {
+    const plan: PlanType = 'free'
     session = {
+      id: sessionId,
+      identityKey: clientId ? `client:${clientId}` : `session:${sessionId}`,
+      clientIp,
+      plan,
+      usagePeriod: currentPeriod,
+      usedCount: 0,
+      priority: getPriority(plan),
       userApiKey: null,
       cachedWorkingModel: null,
       cachedModelKey: null,
       lastActive: Date.now(),
     }
     sessionStore.set(sessionId, session)
+    if (clientId) sessionStore.set(`client:${clientId}`, session)
+    if (clientIp) ipToIdentityMap.set(clientIp, sessionId)
   } else {
     session.lastActive = Date.now()
+    ensureActivePeriod(session)
   }
+
   return session
 }
 
 function getActiveKey(c: Context): string | null {
   const session = getSession(c)
   return session.userApiKey || process.env.GEMINI_API_KEY || null
+}
+
+// ── Quota & Priority Enforcement ──────────────────────────────────────────────
+
+export interface QuotaCheckResult {
+  allowed: boolean
+  plan: PlanType
+  used: number
+  limit: number
+  remaining: number
+  period: string
+  priority: PriorityLevel
+  errorResponse?: {
+    success: false
+    error: string
+    message: string
+    plan: PlanType
+    used: number
+    limit: number
+    remaining: number
+  }
+}
+
+export function checkQuota(session: UserSession): QuotaCheckResult {
+  ensureActivePeriod(session)
+  const plan = session.plan || 'free'
+  const limit = getMonthlyLimit(plan)
+  const priority = getPriority(plan)
+  const used = session.usedCount || 0
+  const remaining = Math.max(0, limit - used)
+
+  if (used >= limit) {
+    return {
+      allowed: false,
+      plan,
+      used,
+      limit,
+      remaining: 0,
+      period: session.usagePeriod || getCurrentPeriod(),
+      priority,
+      errorResponse: {
+        success: false,
+        error: 'MONTHLY_LIMIT_REACHED',
+        message: "You've reached your monthly AI generation limit.",
+        plan,
+        used,
+        limit,
+        remaining: 0,
+      },
+    }
+  }
+
+  return {
+    allowed: true,
+    plan,
+    used,
+    limit,
+    remaining,
+    period: session.usagePeriod || getCurrentPeriod(),
+    priority,
+  }
+}
+
+export async function executeWithPriority<T>(
+  priority: PriorityLevel,
+  task: () => Promise<T>
+): Promise<T> {
+  // Pro priority execution abstraction
+  // In a multi-worker setup, Pro requests enter high-priority processing
+  return await task()
+}
+
+export function getCurrentYearInstruction(): string {
+  const currentYear = new Date().getFullYear()
+  return `Use the current year when a year is relevant. Current year: ${currentYear}. Never use outdated years such as 2024 or 2025 unless the user explicitly asks for historical information.`
+}
+
+// ── Business Architecture Hook (Free vs Pro Plans) ─────────────────────────────
+export interface RequestUsageContext {
+  plan: 'free' | 'pro'
+  keySource: 'environment' | 'user' | 'none'
+  canProceed: boolean
+  limitMessage?: string
+}
+
+export function evaluateUsageContext(c: Context): RequestUsageContext {
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  const hasUserKey = !!session.userApiKey
+  const hasEnvKey = !!process.env.GEMINI_API_KEY
+
+  return {
+    plan: session.plan || 'free',
+    keySource: hasUserKey ? 'user' : hasEnvKey ? 'environment' : 'none',
+    canProceed: quota.allowed,
+    limitMessage: quota.allowed ? undefined : quota.errorResponse?.message,
+  }
 }
 
 // ── Gemini Helper & Model Discovery ──────────────────────────────────────────
@@ -85,28 +295,6 @@ const MODEL_CANDIDATES = [
 
 // Server-level working model cache for the shared environment key (free users)
 let envModelCache: { model: string; key: string } | null = null
-
-// ── Future Business Architecture Hook (Free vs Pro Plans) ──
-// Ready for: User Account -> Plan (Free/Pro) -> Usage Limit -> Gemini Request -> Usage Tracking
-export interface RequestUsageContext {
-  plan: 'free' | 'pro'
-  keySource: 'environment' | 'user' | 'none'
-  canProceed: boolean
-  limitMessage?: string
-}
-
-export function evaluateUsageContext(c: Context): RequestUsageContext {
-  const session = getSession(c)
-  const hasUserKey = !!session.userApiKey
-  const hasEnvKey = !!process.env.GEMINI_API_KEY
-
-  // In the future, verify user session token, lookup plan in DB, check usage count
-  return {
-    plan: 'free',
-    keySource: hasUserKey ? 'user' : hasEnvKey ? 'environment' : 'none',
-    canProceed: true,
-  }
-}
 
 interface GeminiError {
   status: number
@@ -477,13 +665,14 @@ What's one moment that shaped your professional journey? I'd love to hear your s
     }
 
     case 'seo': {
+      const currentYear = new Date().getFullYear()
       const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
       const words = topic.toLowerCase().split(/\s+/).filter((w) => w.length > 3)
       const focusKeyword = words.slice(0, 3).join(' ') || topic.toLowerCase()
       const related = words.slice(0, 5).length > 1 ? words.slice(0, 5).join(', ') : 'content strategy, digital marketing, best practices'
 
       return `SEO Title:
-${topic} | Complete Guide & Tips [2026]
+${topic} | Complete Guide & Tips [${currentYear}]
 
 Meta Description:
 Discover everything you need to know about ${topic}. Expert tips, actionable strategies, and proven methods to boost your results. Read now!
@@ -495,7 +684,7 @@ Related Keywords:
 ${related}
 
 H1:
-${topic} â€” Everything You Need to Know in 2026
+${topic} — Everything You Need to Know in ${currentYear}
 
 H2 Suggestions:
 1. Why ${topic} Matters More Than Ever
@@ -517,7 +706,7 @@ A: Most people see meaningful results within 2-3 months of consistent effort, th
 Q: What are the best tools for ${topic}?
 A: Start with free tools like Google Analytics and Google Search Console, then consider premium options as your needs grow.
 
-Q: Is ${topic} still relevant in 2026?
+Q: Is ${topic} still relevant in ${currentYear}?
 A: Absolutely. ${topic} continues to evolve and remains one of the most effective strategies for long-term growth.
 
 Estimated SEO Score: 74/100`
@@ -749,8 +938,16 @@ app.post('/generate', async (c) => {
     return c.json({ error: 'Please provide key points or a topic.' }, 400)
   }
 
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  if (!quota.allowed) {
+    return c.json(quota.errorResponse, 429)
+  }
+
+  const currentYear = new Date().getFullYear()
   const prompt = `You are a professional content writer.
 IMPORTANT: Write the entire content in ${language || 'English'} language.
+${getCurrentYearInstruction()}
 
 Create a ${contentType || 'blog post'} based on these key points:
 
@@ -763,9 +960,27 @@ Requirements:
 
 Write the complete content now. Do not include any meta-commentary, just the content itself.`
 
-  const result = await safeCallGemini(c, prompt, 'generate', keyPoints)
+  const result = await executeWithPriority(quota.priority, () =>
+    safeCallGemini(c, prompt, 'generate', keyPoints)
+  )
+
   if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
-  return c.json({ content: result.content, demo: result.demo })
+
+  session.usedCount = (session.usedCount || 0) + 1
+  const updatedQuota = checkQuota(session)
+
+  return c.json({
+    content: result.content,
+    demo: result.demo,
+    usage: {
+      plan: updatedQuota.plan,
+      used: updatedQuota.used,
+      limit: updatedQuota.limit,
+      remaining: updatedQuota.remaining,
+      period: updatedQuota.period,
+      priority: updatedQuota.priority,
+    },
+  })
 })
 
 app.post('/linkedin', async (c) => {
@@ -776,7 +991,14 @@ app.post('/linkedin', async (c) => {
     return c.json({ error: 'Please provide your key points.' }, 400)
   }
 
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  if (!quota.allowed) {
+    return c.json(quota.errorResponse, 429)
+  }
+
   const prompt = `Transform these rough notes into a complete, professional LinkedIn post:
+${getCurrentYearInstruction()}
 
 Notes: "${points}"
 
@@ -797,9 +1019,27 @@ Rules:
 
 Write the LinkedIn post now.`
 
-  const result = await safeCallGemini(c, prompt, 'linkedin', points)
+  const result = await executeWithPriority(quota.priority, () =>
+    safeCallGemini(c, prompt, 'linkedin', points)
+  )
+
   if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
-  return c.json({ content: result.content, demo: result.demo })
+
+  session.usedCount = (session.usedCount || 0) + 1
+  const updatedQuota = checkQuota(session)
+
+  return c.json({
+    content: result.content,
+    demo: result.demo,
+    usage: {
+      plan: updatedQuota.plan,
+      used: updatedQuota.used,
+      limit: updatedQuota.limit,
+      remaining: updatedQuota.remaining,
+      period: updatedQuota.period,
+      priority: updatedQuota.priority,
+    },
+  })
 })
 
 app.post('/rewrite', async (c) => {
@@ -808,6 +1048,12 @@ app.post('/rewrite', async (c) => {
 
   if (!content?.trim()) {
     return c.json({ error: 'Please provide content to rewrite.' }, 400)
+  }
+
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  if (!quota.allowed) {
+    return c.json(quota.errorResponse, 429)
   }
 
   const actionPrompts: Record<string, string> = {
@@ -824,15 +1070,34 @@ app.post('/rewrite', async (c) => {
   const instruction = actionPrompts[action] || actionPrompts.improve
 
   const prompt = `${instruction}
+${getCurrentYearInstruction()}
 
 Original content:
 "${content}"
 
 Write the improved version now. Do not add explanations — just provide the rewritten content.`
 
-  const result = await safeCallGemini(c, prompt, 'rewrite', content)
+  const result = await executeWithPriority(quota.priority, () =>
+    safeCallGemini(c, prompt, 'rewrite', content)
+  )
+
   if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
-  return c.json({ content: result.content, demo: result.demo })
+
+  session.usedCount = (session.usedCount || 0) + 1
+  const updatedQuota = checkQuota(session)
+
+  return c.json({
+    content: result.content,
+    demo: result.demo,
+    usage: {
+      plan: updatedQuota.plan,
+      used: updatedQuota.used,
+      limit: updatedQuota.limit,
+      remaining: updatedQuota.remaining,
+      period: updatedQuota.period,
+      priority: updatedQuota.priority,
+    },
+  })
 })
 
 app.post('/seo', async (c) => {
@@ -843,7 +1108,14 @@ app.post('/seo', async (c) => {
     return c.json({ error: 'Please provide a topic or content for SEO analysis.' }, 400)
   }
 
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  if (!quota.allowed) {
+    return c.json(quota.errorResponse, 429)
+  }
+
   const prompt = `Analyze this topic/content for SEO and provide a complete SEO toolkit:
+${getCurrentYearInstruction()}
 
 Topic: "${topic}"
 
@@ -860,9 +1132,27 @@ Provide ALL of the following:
 
 Format the output clearly with labels and line breaks. Be specific and actionable.`
 
-  const result = await safeCallGemini(c, prompt, 'seo', topic)
+  const result = await executeWithPriority(quota.priority, () =>
+    safeCallGemini(c, prompt, 'seo', topic)
+  )
+
   if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
-  return c.json({ content: result.content, demo: result.demo })
+
+  session.usedCount = (session.usedCount || 0) + 1
+  const updatedQuota = checkQuota(session)
+
+  return c.json({
+    content: result.content,
+    demo: result.demo,
+    usage: {
+      plan: updatedQuota.plan,
+      used: updatedQuota.used,
+      limit: updatedQuota.limit,
+      remaining: updatedQuota.remaining,
+      period: updatedQuota.period,
+      priority: updatedQuota.priority,
+    },
+  })
 })
 
 app.post('/youtube', async (c) => {
@@ -873,7 +1163,14 @@ app.post('/youtube', async (c) => {
     return c.json({ error: 'Please provide a topic for YouTube content.' }, 400)
   }
 
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  if (!quota.allowed) {
+    return c.json(quota.errorResponse, 429)
+  }
+
   const prompt = `Create complete YouTube content package for this video:
+${getCurrentYearInstruction()}
 
 Topic: "${topic}"
 Target Audience: ${audience || 'General audience'}
@@ -892,9 +1189,85 @@ Provide ALL of the following:
 
 Format clearly with section headers. Make the content engaging and optimized for YouTube's algorithm.`
 
-  const result = await safeCallGemini(c, prompt, 'youtube', topic)
+  const result = await executeWithPriority(quota.priority, () =>
+    safeCallGemini(c, prompt, 'youtube', topic)
+  )
+
   if (result.error) return c.json({ error: result.error }, (result.status || 400) as any)
-  return c.json({ content: result.content, demo: result.demo })
+
+  session.usedCount = (session.usedCount || 0) + 1
+  const updatedQuota = checkQuota(session)
+
+  return c.json({
+    content: result.content,
+    demo: result.demo,
+    usage: {
+      plan: updatedQuota.plan,
+      used: updatedQuota.used,
+      limit: updatedQuota.limit,
+      remaining: updatedQuota.remaining,
+      period: updatedQuota.period,
+      priority: updatedQuota.priority,
+    },
+  })
+})
+
+// ── Plan & Subscription Management (Payment-Ready Abstraction) ───────────────
+
+app.get('/plan/usage', (c) => {
+  const session = getSession(c)
+  const quota = checkQuota(session)
+  const planConfig = getPlanConfig(quota.plan)
+  return c.json({
+    success: true,
+    plan: quota.plan,
+    name: planConfig.name,
+    used: quota.used,
+    limit: quota.limit,
+    remaining: quota.remaining,
+    period: quota.period,
+    priority: quota.priority,
+    priorityLabel: planConfig.priorityLabel,
+    badge: planConfig.badge,
+    badgeColor: planConfig.badgeColor,
+    features: planConfig.features,
+    allowLongForm: planConfig.allowLongForm,
+    allowAdvancedOptions: planConfig.allowAdvancedOptions,
+  })
+})
+
+// Payment-ready plan abstraction:
+// Allows switching user plan without touching generation or Gemini code.
+// Future Stripe/Razorpay webhooks can directly call this endpoint or internal handler.
+app.post('/plan/set-plan', async (c) => {
+  const body = await c.req.json()
+  const { plan } = body
+
+  if (plan !== 'free' && plan !== 'pro') {
+    return c.json({ error: "Invalid plan. Must be 'free' or 'pro'." }, 400)
+  }
+
+  const session = getSession(c)
+  session.plan = plan
+  session.priority = getPriority(plan)
+  const quota = checkQuota(session)
+  const planConfig = getPlanConfig(quota.plan)
+
+  return c.json({
+    success: true,
+    message: `Plan successfully updated to ${planConfig.name}.`,
+    plan: quota.plan,
+    name: planConfig.name,
+    used: quota.used,
+    limit: quota.limit,
+    remaining: quota.remaining,
+    period: quota.period,
+    priority: quota.priority,
+    priorityLabel: planConfig.priorityLabel,
+    badge: planConfig.badge,
+    badgeColor: planConfig.badgeColor,
+    features: planConfig.features,
+  })
 })
 
 // ── Settings Routes ───────────────────────────────────────────────────────────
